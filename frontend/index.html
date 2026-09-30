@@ -26,7 +26,16 @@
   .section-head .spacer { flex: 1; }
 
   .board-card { overflow: hidden; padding: 0; }
-  .board-card .thumb-box { aspect-ratio: 16/9; border-radius: 0; border-bottom: 1px solid var(--border-soft); }
+  .board-card .thumb-box { aspect-ratio: 16/9; border-radius: 0; border-bottom: 1px solid var(--border-soft); position: relative; }
+  .board-card.is-frozen { outline: 1px solid #e8697d66; }
+  .board-card.is-frozen .thumb-box img { filter: saturate(.55); }
+  .board-card .thumb-lock {
+    position: absolute; right: 8px; top: 8px; z-index: 2;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: #e8697dee; color: #fff; font-size: 13px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 2px 8px rgba(232,105,125,.4);
+  }
   .board-card .info { padding: 12px 14px; }
   .board-card .name { font-weight: 700; font-size: 14.5px; display: flex; align-items: center; gap: 6px; }
   .board-card .sub { color: var(--text-mute); font-size: 12px; margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -134,14 +143,15 @@ function boardEditorHref(board) {
 function boardCard(board) {
   const roleBadge = { owner: '<span class="badge accent">所有者</span>', editor: '<span class="badge green">可编辑</span>',
     commenter: '<span class="badge yellow">可评论</span>', viewer: '<span class="badge">只读</span>' }[board.your_role] || '';
+  const frozenBadge = board.frozen ? '<span class="badge red" title="已冻结为只读">🔒 已冻结</span>' : '';
   const thumb = board.thumbnail
     ? `<img src="${board.thumbnail}" alt="">`
     : `<span class="placeholder">${board.mode === 'mindmap' ? '🧠' : '🎨'}</span>`;
   return `
-  <div class="card hoverable board-card" data-id="${board.id}">
-    <div class="thumb-box">${thumb}</div>
+  <div class="card hoverable board-card ${board.frozen ? 'is-frozen' : ''}" data-id="${board.id}">
+    <div class="thumb-box">${thumb}${board.frozen ? '<span class="thumb-lock">🔒</span>' : ''}</div>
     <div class="info">
-      <div class="name">${board.mode === 'mindmap' ? '🧠' : '🎨'} ${escapeHtml(board.name)} ${roleBadge}</div>
+      <div class="name">${board.mode === 'mindmap' ? '🧠' : '🎨'} ${escapeHtml(board.name)} ${frozenBadge}${roleBadge}</div>
       <div class="sub">
         <span>${fmtRel(board.updated_at)}</span>
         <span>·</span><span>${board.stats?.shapes ?? '—'} 图形</span>

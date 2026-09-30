@@ -21,7 +21,7 @@ from . import auth, config
 from .crdt import BoardDoc, validate_op
 from .history import history_service
 from .models import (BoardCreateReq, BoardPatchReq, DuplicateReq,
-                     PermissionsReq)
+                     FreezeReq, PermissionsReq)
 from .storage import (now_ms, read_json, safe_id, write_json_atomic,
                       write_json_atomic_async)
 
@@ -34,6 +34,10 @@ def new_board_id() -> str:
 
 def new_op_id_site() -> str:
     return "srv-" + secrets.token_hex(4)
+
+
+class BoardFrozenError(Exception):
+    """白板已冻结, 任何内容修改(含原编辑者/所有者)都被拒绝。"""
 
 
 class BoardManager:
@@ -90,6 +94,7 @@ class BoardManager:
             "id": meta.get("id"), "name": meta.get("name"), "mode": meta.get("mode"),
             "owner": meta.get("owner"), "created_at": meta.get("created_at"),
             "updated_at": meta.get("updated_at"), "tags": meta.get("tags") or [],
+            "frozen": bool(meta.get("frozen")),
         }
 
     def _write_index(self, boards: Optional[Dict[str, Any]] = None) -> None:
@@ -106,6 +111,8 @@ class BoardManager:
             if isinstance(disk, dict) and disk.get("id"):
                 self.metas[board_id] = disk
                 meta = disk
+        if meta is not None and "frozen" not in meta:
+            meta["frozen"] = False          # 兼容冻结功能上线前创建的旧白板
         return meta
 
     async def save_meta(self, board_id: str) -> None:
@@ -203,6 +210,10 @@ class BoardManager:
         max_batch = int(settings.get("max_ops_per_batch") or 64)
         accepted: List[Dict[str, Any]] = []
         async with self.lock_for(board_id):
+            meta = self.get_meta(board_id)
+            if meta is not None and meta.get("frozen"):
+                # 冻结即只读: 服务端强制, 角色再高(owner/admin)也不例外
+                raise BoardFrozenError(board_id)
             doc = await self.get_doc(board_id)
             for raw in raw_ops[:max_batch]:
                 clean = validate_op(raw)
@@ -293,6 +304,10 @@ class BoardManager:
             "owner": owner,
             "acl": {},
             "public_role": None,
+            "frozen": False,
+            "frozen_at": None,
+            "frozen_by": None,
+            "frozen_reason": None,
             "tags": [str(t)[:20] for t in (tags or [])][:10],
             "created_at": now,
             "updated_at": now,
@@ -367,6 +382,29 @@ class BoardManager:
         await self.force_snapshot(meta["id"])
         return meta
 
+    async def set_frozen(self, board_id: str, frozen: bool,
+                         by: str, reason: Optional[str] = None) -> Dict[str, Any]:
+        """冻结/解冻白板。冻结前强制快照, 把定稿状态完整落盘。"""
+        meta = self.get_meta(board_id)
+        if meta is None:
+            raise KeyError(board_id)
+        meta["frozen"] = bool(frozen)
+        if frozen:
+            meta["frozen_at"] = now_ms()
+            meta["frozen_by"] = by
+            meta["frozen_reason"] = (reason or "")[:200] or None
+            # 定稿即存档: 冻结瞬间的内容强制生成快照, 回放/导出始终可还原
+            try:
+                await self.force_snapshot(board_id)
+            except Exception:                                   # noqa: BLE001
+                pass
+        else:
+            meta["frozen_at"] = None
+            meta["frozen_by"] = None
+            meta["frozen_reason"] = None
+        await self.save_meta(board_id)
+        return meta
+
 
 manager = BoardManager()
 
@@ -405,6 +443,7 @@ async def list_boards(q: str = "", mode: str = "", tag: str = "",
             continue
         item = dict(meta)
         item["your_role"] = role
+        item["frozen"] = bool(meta.get("frozen"))   # 兼容旧白板(无冻结字段)
         item.pop("acl", None)
         out.append(item)
     reverse = sort == "name"
@@ -433,6 +472,9 @@ async def get_board(board_id: str, user: Dict[str, Any] = Depends(auth.current_u
 async def patch_board(board_id: str, req: BoardPatchReq,
                       user: Dict[str, Any] = Depends(auth.current_user)):
     meta, role = await board_ctx(board_id, user, "editor")
+    if meta.get("frozen"):
+        raise HTTPException(status_code=409,
+                            detail="白板已冻结, 无法修改名称/标签/缩略图等信息")
     if req.name is not None:
         meta["name"] = req.name[:80]
     if req.mode in ("board", "mindmap"):
@@ -480,9 +522,48 @@ async def get_state(board_id: str, user: Dict[str, Any] = Depends(auth.current_u
 
 @router.post("/{board_id}/snapshot")
 async def force_snapshot(board_id: str, user: Dict[str, Any] = Depends(auth.current_user)):
-    await board_ctx(board_id, user, "editor")
+    meta, _role = await board_ctx(board_id, user, "editor")
+    if meta.get("frozen"):
+        raise HTTPException(status_code=409, detail="白板已冻结, 无法保存快照")
     rev = await manager.force_snapshot(board_id)
     return {"ok": True, "snapshot_rev": rev}
+
+
+@router.post("/{board_id}/freeze")
+async def freeze_board(board_id: str, req: FreezeReq,
+                       user: Dict[str, Any] = Depends(auth.current_user)):
+    """冻结白板为只读(仅所有者/管理员)。"""
+    meta, _role = await board_ctx(board_id, user, "owner")
+    if meta.get("frozen"):
+        return {"board": meta, "ok": True, "changed": False}
+    meta = await manager.set_frozen(board_id, True, user["username"], req.reason)
+    await _broadcast_freeze(board_id, True, user)
+    return {"board": meta, "ok": True, "changed": True}
+
+
+@router.post("/{board_id}/unfreeze")
+async def unfreeze_board(board_id: str, req: FreezeReq,
+                         user: Dict[str, Any] = Depends(auth.current_user)):
+    """解除冻结(仅所有者/管理员)。"""
+    meta, _role = await board_ctx(board_id, user, "owner")
+    if not meta.get("frozen"):
+        return {"board": meta, "ok": True, "changed": False}
+    meta = await manager.set_frozen(board_id, False, user["username"])
+    await _broadcast_freeze(board_id, False, user)
+    return {"board": meta, "ok": True, "changed": True}
+
+
+async def _broadcast_freeze(board_id: str, frozen: bool,
+                            user: Dict[str, Any]) -> None:
+    """通知房间内所有连接即时切换只读/可编辑状态。"""
+    from .ws import conn_manager
+    await conn_manager.broadcast(board_id, {
+        "type": "frozen" if frozen else "unfrozen",
+        "frozen": frozen,
+        "by": user.get("username"),
+        "display_name": user.get("display_name") or user.get("username"),
+        "ts": now_ms(),
+    })
 
 
 @router.get("/{board_id}/permissions")
@@ -495,9 +576,13 @@ async def get_permissions(board_id: str, user: Dict[str, Any] = Depends(auth.cur
         "acl": meta.get("acl") or {},
         "public_role": meta.get("public_role"),
         "your_role": role,
+        "frozen": bool(meta.get("frozen")),
+        "frozen_at": meta.get("frozen_at"),
+        "frozen_by": meta.get("frozen_by"),
+        "frozen_reason": meta.get("frozen_reason"),
+        "can_manage": role == "owner",
         "users": [{"username": u["username"], "display_name": u["display_name"],
                    "color": u["color"], "role": u["role"]} for u in users],
-        "can_manage": role == "owner",
     }
 
 

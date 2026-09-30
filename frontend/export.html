@@ -225,7 +225,7 @@ async function loadBoards() {
   state.boards = data.boards || [];
   const sel = $('board-select');
   sel.innerHTML = state.boards.length
-    ? state.boards.map((b) => `<option value="${b.id}">${escapeHtml(b.name)}${b.mode === 'mindmap' ? ' 🧠' : ' 🎨'}</option>`).join('')
+    ? state.boards.map((b) => `<option value="${b.id}">${b.frozen ? '🔒 ' : ''}${escapeHtml(b.name)}${b.mode === 'mindmap' ? ' 🧠' : ' 🎨'}</option>`).join('')
     : '<option value="">暂无白板, 请先创建</option>';
   const wanted = new URLSearchParams(location.search).get('board')
     || localStorage.getItem(LS_BOARD) || state.boards[0]?.id;

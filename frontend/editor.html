@@ -74,6 +74,26 @@
     display: flex; align-items: center; justify-content: center; padding: 30px;
   }
   .board-picker .inner { width: 100%; max-width: 640px; max-height: 80vh; overflow: auto; }
+
+  /* 冻结只读状态 */
+  .frozen-banner {
+    display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 14px; font-size: 13px;
+    background: #e8697d22; border-bottom: 1px solid var(--red);
+    color: var(--red); font-weight: 600; flex: none;
+  }
+  .frozen-banner.show { display: flex; }
+  .frozen-banner .spacer { flex: 1; }
+  .frozen-banner .muted-fz { color: var(--text-mute); font-weight: 400; font-size: 12px; }
+  .freeze-ribbon {
+    position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+    z-index: 30; display: none; align-items: center; gap: 8px;
+    padding: 6px 16px; border-radius: 20px;
+    background: #e8697dee; color: #fff; font-size: 13px; font-weight: 700;
+    box-shadow: 0 4px 14px rgba(232,105,125,.35); pointer-events: none;
+    letter-spacing: 1px;
+  }
+  .freeze-ribbon.show { display: inline-flex; }
   .bp-item {
     display: flex; align-items: center; gap: 12px; padding: 12px 14px;
     border: 1px solid var(--border); border-radius: var(--radius);
@@ -92,6 +112,7 @@
   <div class="ed-topline">
     <span class="ed-board-name" id="board-name" title="点击重命名">…</span>
     <span class="badge" id="mode-badge">白板</span>
+    <span class="badge red hidden" id="frozen-badge" title="白板已冻结为只读">🔒 已冻结</span>
     <button class="btn sm ghost" id="btn-mindmap" title="在思维导图页打开">🧠 导图模式</button>
     <div class="vdivider"></div>
     <button class="btn sm ghost" id="btn-undo" title="撤销 Ctrl+Z" disabled>↩︎</button>
@@ -106,7 +127,17 @@
     <span class="conn-badge" id="conn-badge"><span class="dot off"></span>连接中…</span>
     <button class="btn sm ghost" id="btn-share" title="复制邀请链接">🔗 分享</button>
     <button class="btn sm ghost" id="btn-snapshot" title="手动保存状态快照">💾 快照</button>
+    <button class="btn sm ghost" id="btn-freeze" title="冻结为只读(仅所有者/管理员)">🔒 冻结</button>
     <button class="btn sm ghost" id="btn-help" title="快捷键帮助">？</button>
+  </div>
+
+  <!-- 冻结提示条 -->
+  <div class="frozen-banner" id="frozen-banner">
+    <span>🔒 该白板已冻结, 当前为只读状态</span>
+    <span class="muted-fz" id="frozen-meta"></span>
+    <span class="spacer"></span>
+    <span class="muted-fz">可正常查看 · 回放 · 导出</span>
+    <button class="btn sm ghost hidden" id="btn-unfreeze">解除冻结</button>
   </div>
 
   <div class="ed-body">
@@ -114,7 +145,9 @@
     <div class="ed-rail" id="tool-rail"></div>
 
     <!-- 画布 -->
-    <div class="ed-canvas-host" id="canvas-host"></div>
+    <div class="ed-canvas-host" id="canvas-host">
+      <div class="freeze-ribbon" id="freeze-ribbon">🔒 已冻结 · 只读</div>
+    </div>
 
     <!-- 样式面板 -->
     <div class="ed-side" id="side-panel">
@@ -223,7 +256,7 @@ if (!boardId) {
       <div class="bp-item" data-id="${b.id}" data-mode="${b.mode}">
         <span style="font-size:20px">${b.mode === 'mindmap' ? '🧠' : '🎨'}</span>
         <span>
-          <div class="bold">${escapeHtml(b.name)}</div>
+          <div class="bold">${escapeHtml(b.name)} ${b.frozen ? '<span class="badge red">🔒 已冻结</span>' : ''}</div>
           <div class="small muted">${fmtRel(b.updated_at)} · ${b.stats?.shapes ?? 0} 图形 · ${escapeHtml(b.your_role)}</div>
         </span>
       </div>`).join('') || '<div class="empty-state"><div class="icon">🗒</div><div class="title">还没有白板, 先创建一个吧</div></div>';
@@ -274,8 +307,35 @@ const tools = new ToolManager({
 /* ---------------------------------------------------------------- 顶栏与状态 */
 let boardMeta = null;
 let myRole = 'viewer';
+let isFrozen = false;
+let canManageFreeze = false;
 
 const $ = (id) => document.getElementById(id);
+
+function computeReadOnly() {
+  return isFrozen || myRole === 'viewer' || myRole === 'commenter';
+}
+
+function applyFrozenUI() {
+  const banner = $('frozen-banner');
+  banner.classList.toggle('show', isFrozen);
+  $('frozen-badge').classList.toggle('hidden', !isFrozen);
+  $('freeze-ribbon').classList.toggle('show', isFrozen);
+  $('btn-freeze').classList.toggle('hidden', isFrozen || !canManageFreeze);
+  $('btn-unfreeze').classList.toggle('hidden', !isFrozen || !canManageFreeze);
+  if (isFrozen && boardMeta) {
+    const parts = [];
+    if (boardMeta.frozen_by) parts.push(`由 @${boardMeta.frozen_by} 冻结`);
+    if (boardMeta.frozen_at) parts.push(fmtRel(boardMeta.frozen_at));
+    if (boardMeta.frozen_reason) parts.push(`原因: ${boardMeta.frozen_reason}`);
+    $('frozen-meta').textContent = parts.join(' · ');
+  }
+  tools.readOnly = computeReadOnly();
+  updateHistoryButtons();
+  // 冻结后即便原本是编辑者, 撤销/重做也不应再产生操作
+  $('btn-undo').disabled = $('btn-undo').disabled || isFrozen;
+  $('btn-redo').disabled = $('btn-redo').disabled || isFrozen;
+}
 
 function setConnBadge(status, extra = {}) {
   const el = $('conn-badge');
@@ -437,6 +497,7 @@ engine.opts.onZoomChange = null;
 tools.opts.onZoomChange = () => updateZoomLabel();
 
 $('board-name').onclick = async () => {
+  if (isFrozen) return toast('白板已冻结, 无法重命名', 'warn');
   if (!['owner', 'editor'].includes(myRole)) return toast('无重命名权限', 'warn');
   const name = await promptDialog('白板名称', { value: boardMeta?.name || '' });
   if (!name) return;
@@ -475,6 +536,45 @@ $('btn-snapshot').onclick = async () => {
     toast(`快照已保存 @rev ${data.snapshot_rev}`, 'success');
   } catch (err) { toast(err.message || '快照失败', 'error'); }
 };
+
+async function freezeBoard() {
+  const reason = await promptDialog('冻结原因(可选, 将展示给所有成员)', {
+    title: `冻结白板 · ${boardMeta?.name || ''}`, value: '',
+  });
+  if (reason === null) return;
+  try {
+    const { board } = await Api.boards.freeze(boardId, reason.trim());
+    boardMeta = board;
+    setFrozen(true, { silent: false });
+    toast('白板已冻结, 所有人均无法再修改内容', 'success', 4000);
+  } catch (err) { toast(err.message || '冻结失败', 'error'); }
+}
+
+async function unfreezeBoard() {
+  const ok = await confirmDialog(`解除白板「${boardMeta?.name || ''}」的冻结? 解除后编辑者可继续修改内容。`,
+    { title: '解除冻结' });
+  if (!ok) return;
+  try {
+    const { board } = await Api.boards.unfreeze(boardId);
+    boardMeta = board;
+    setFrozen(false, { silent: false });
+    toast('已解除冻结, 可继续编辑', 'success');
+  } catch (err) { toast(err.message || '解除冻结失败', 'error'); }
+}
+
+function setFrozen(frozen, { silent = false } = {}) {
+  if (isFrozen === frozen) { tools.readOnly = computeReadOnly(); return; }
+  isFrozen = frozen;
+  if (frozen) crdt.clearHistory();        // 冻结后不允许通过撤销/重做产生新操作
+  applyFrozenUI();
+  if (!silent) {
+    if (frozen) toast('🔒 白板已被冻结, 当前为只读状态', 'warn', 4200);
+    else toast('🔓 白板已解除冻结', 'success', 3000);
+  }
+}
+
+$('btn-freeze').onclick = freezeBoard;
+$('btn-unfreeze').onclick = unfreezeBoard;
 
 $('btn-help').onclick = () => {
   modal({
@@ -525,6 +625,7 @@ function afterLocalChange() {
 
 socket.on('welcome', async (msg) => {
   myRole = msg.role || 'viewer';
+  canManageFreeze = myRole === 'owner';
   $('st-role').textContent = `角色: ${myRole}`;
   if (msg.board) {
     boardMeta = { ...(boardMeta || {}), ...msg.board };
@@ -535,6 +636,7 @@ socket.on('welcome', async (msg) => {
       // 思维导图模式的白板建议去专门页面(仍可在此自由编辑)
       $('btn-mindmap').classList.add('primary');
     }
+    isFrozen = !!msg.board.frozen;
   }
   if (msg.state) {
     shapes.clear();
@@ -549,14 +651,34 @@ socket.on('welcome', async (msg) => {
     toast(`已补发 ${msg.catchup.ops.length} 个离线期间的操作`, 'success');
   }
   renderUsers(msg.clients);
-  tools.readOnly = myRole === 'viewer' || myRole === 'commenter';
-  if (tools.readOnly) {
-    toast(myRole === 'commenter' ? '你是评论成员: 可查看与聊天, 不可编辑' : '你是只读成员: 仅可查看', 'warn', 4200);
+  applyFrozenUI();
+  if (computeReadOnly()) {
+    if (isFrozen) toast('🔒 白板已冻结: 可查看、回放与导出, 无法编辑', 'warn', 4200);
+    else toast(myRole === 'commenter' ? '你是评论成员: 可查看与聊天, 不可编辑' : '你是只读成员: 仅可查看', 'warn', 4200);
   }
   if (!engine._userMoved) { engine.fitToContent(); }
   engine.markDirty();
   updateStats();
   markAllPathsDirty();
+});
+
+socket.on('frozen', (msg) => {
+  if (boardMeta) {
+    boardMeta.frozen = true;
+    boardMeta.frozen_at = msg.ts;
+    boardMeta.frozen_by = msg.by;
+  }
+  setFrozen(true);
+});
+
+socket.on('unfrozen', (msg) => {
+  if (boardMeta) {
+    boardMeta.frozen = false;
+    boardMeta.frozen_at = null;
+    boardMeta.frozen_by = null;
+    boardMeta.frozen_reason = null;
+  }
+  setFrozen(false);
 });
 
 socket.on('ops', (msg) => {
@@ -604,7 +726,10 @@ socket.on('chat', (msg) => {
 
 socket.on('error', (msg) => {
   if (msg.code === 'read_only') toast(msg.message || '只读', 'warn');
-  else if (msg.code !== 'bad_json') toast(`协同错误: ${msg.message || msg.code}`, 'error');
+  else if (msg.code === 'board_frozen') {
+    setFrozen(true);
+    toast(msg.message || '白板已冻结, 无法修改', 'warn');
+  } else if (msg.code !== 'bad_json') toast(`协同错误: ${msg.message || msg.code}`, 'error');
 });
 
 socket.on('fatal', async (msg) => {
@@ -625,6 +750,8 @@ try {
   const data = await Api.boards.state(boardId);
   boardMeta = data.board;
   myRole = data.your_role;
+  isFrozen = !!boardMeta.frozen;
+  canManageFreeze = myRole === 'owner';
   $('board-name').textContent = boardMeta.name || '未命名白板';
   document.title = `${boardMeta.name} · 白板编辑`;
   $('mode-badge').textContent = boardMeta.mode === 'mindmap' ? '思维导图' : '白板';
@@ -635,7 +762,7 @@ try {
   syncZCounter(shapes);
   engine.fitToContent();
   updateStats();
-  tools.readOnly = myRole === 'viewer' || myRole === 'commenter';
+  applyFrozenUI();
 } catch (err) {
   if (err.status === 403) {
     document.body.innerHTML = '<div class="empty-state" style="height:100vh"><div class="icon">🔒</div><div class="title">无权访问该白板</div><div>请向所有者申请权限, 或<a href="/permissions.html">查看权限页</a></div></div>';
@@ -651,7 +778,7 @@ socket.connect();
 
 /* ---------------------------------------------------------------- 缩略图 & 状态刷新 */
 const scheduleThumbnail = debounce(async () => {
-  if (!['owner', 'editor'].includes(myRole)) return;
+  if (isFrozen || !['owner', 'editor'].includes(myRole)) return;
   try {
     const canvas = document.createElement('canvas');
     const alive = [...shapes.values()].filter((s) => !s.deleted && s.kind !== 'ghost');
@@ -663,7 +790,7 @@ const scheduleThumbnail = debounce(async () => {
 
 window.addEventListener('beforeunload', () => {
   // 尽力而为: keepalive 让请求在页面卸载时仍能发出
-  if (!['owner', 'editor'].includes(myRole)) return;
+  if (isFrozen || !['owner', 'editor'].includes(myRole)) return;
   try {
     const canvas = document.createElement('canvas');
     const alive = [...shapes.values()].filter((s) => !s.deleted && s.kind !== 'ghost');

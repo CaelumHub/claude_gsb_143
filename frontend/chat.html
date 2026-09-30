@@ -134,6 +134,7 @@ async function main() {
   let currentBoardId = null;
   let socket = null;
   let myRole = '';
+  let roomFrozen = false;
   let messages = [];                 // 当前房间已加载消息(升序)
   const renderedIds = new Set();
   let hasMore = false;
@@ -163,7 +164,7 @@ async function main() {
     const host = document.getElementById('rooms-list');
     host.innerHTML = boards.map((b) => `
       <div class="room-item ${b.id === currentBoardId ? 'active' : ''}" data-id="${b.id}">
-        <span>${b.mode === 'mindmap' ? '🧠' : '🎨'}</span>
+        <span>${b.frozen ? '🔒' : (b.mode === 'mindmap' ? '🧠' : '🎨')}</span>
         <span class="rname">${escapeHtml(b.name)}</span>
         ${b.id === currentBoardId && members.size
           ? `<span class="online-badge">${members.size} 在线</span>` : ''}
@@ -343,6 +344,11 @@ async function main() {
       $hint.textContent = '未连接房间';
       return;
     }
+    if (roomFrozen) {
+      $input.disabled = true; $send.disabled = true;
+      $hint.textContent = '🔒 该白板已冻结, 聊天已关闭(仍可查看历史消息)';
+      return;
+    }
     if (myRole === 'viewer') {
       $input.disabled = true; $send.disabled = true;
       $hint.textContent = '🔒 您在该房间是只读成员, 不能发言(可请所有者在「用户权限」页调整角色)';
@@ -384,6 +390,7 @@ async function main() {
     renderedIds.clear();
     hasMore = false;
     myRole = '';
+    roomFrozen = !!board?.frozen;
     renderMembers();
     $list.innerHTML = '<div class="empty-state small" style="padding:30px"><div>加载聊天记录…</div></div>';
     renderRooms();
@@ -395,6 +402,7 @@ async function main() {
     socket = new BoardSocket(boardId, { page: 'chat', persist: false, clientId: chatClientId(boardId) });
     socket.on('welcome', (msg) => {
       myRole = msg.role || '';
+      roomFrozen = !!msg.frozen;
       members.clear();
       for (const presence of Object.values(msg.clients || {})) {
         members.set(presence.client_id, presence);
@@ -402,6 +410,8 @@ async function main() {
       renderMembers();
       updateInputState();
     });
+    socket.on('frozen', () => { roomFrozen = true; updateInputState(); toast('白板已冻结, 聊天已关闭', 'warn', 3500); });
+    socket.on('unfrozen', () => { roomFrozen = false; updateInputState(); toast('白板已解除冻结', 'success', 3000); });
     socket.on('chat', ({ message }) => appendMessage(message));
     socket.on('join', (m) => {
       members.set(m.client_id, { ...m });

@@ -65,6 +65,24 @@
   .ed-users { display: flex; align-items: center; }
   .ed-users .wb-avatar { margin-left: -7px; border: 2px solid var(--bg-panel); }
   .ed-users .wb-avatar:first-child { margin-left: 0; }
+
+  .frozen-banner {
+    display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 14px; font-size: 13px; flex: none;
+    background: #e8697d22; border-bottom: 1px solid var(--red);
+    color: var(--red); font-weight: 600;
+  }
+  .frozen-banner.show { display: flex; }
+  .frozen-banner .spacer { flex: 1; }
+  .frozen-banner .muted-fz { color: var(--text-mute); font-weight: 400; font-size: 12px; }
+  .freeze-ribbon {
+    position: absolute; left: 50%; top: 46px; transform: translateX(-50%);
+    z-index: 20; display: none; align-items: center; gap: 8px;
+    padding: 6px 16px; border-radius: 20px;
+    background: #e8697dee; color: #fff; font-size: 13px; font-weight: 700;
+    box-shadow: 0 4px 14px rgba(232,105,125,.35); pointer-events: none;
+  }
+  .freeze-ribbon.show { display: inline-flex; }
 </style>
 </head>
 <body>
@@ -73,6 +91,9 @@
     <button class="btn sm ghost" id="btn-sidebar" title="折叠/展开大纲">☰</button>
     <span class="mm-board-name" id="board-name">…</span>
     <span class="badge purple">思维导图</span>
+    <span class="badge red hidden" id="frozen-badge" title="白板已冻结为只读">🔒 已冻结</span>
+    <button class="btn sm ghost hidden" id="btn-freeze" title="冻结为只读(仅所有者/管理员)">🔒 冻结</button>
+    <button class="btn sm hidden" id="btn-unfreeze">解除冻结</button>
     <div class="vdivider"></div>
     <button class="btn sm" id="btn-child">＋ 子节点 <kbd>Tab</kbd></button>
     <button class="btn sm" id="btn-sibling">＋ 兄弟 <kbd>⏎</kbd></button>
@@ -98,6 +119,13 @@
     <span class="conn-badge" id="conn-badge"><span class="dot off"></span>连接中…</span>
   </div>
 
+  <div class="frozen-banner" id="frozen-banner">
+    <span>🔒 该思维导图已冻结, 当前为只读状态</span>
+    <span class="muted-fz" id="frozen-meta"></span>
+    <span class="spacer"></span>
+    <span class="muted-fz">可正常查看 · 回放 · 导出</span>
+  </div>
+
   <div class="mm-body">
     <aside class="mm-sidebar" id="sidebar">
       <div class="mm-sidebar-head">🗂 大纲 <span class="spacer"></span><span class="small muted" id="node-count"></span></div>
@@ -108,6 +136,7 @@
     </aside>
 
     <div class="mm-canvas-host" id="canvas-host">
+      <div class="freeze-ribbon" id="freeze-ribbon">🔒 已冻结 · 只读</div>
       <div class="mm-zoomctl">
         <button class="btn" id="btn-zoom-in">＋</button>
         <button class="btn" id="btn-zoom-out">−</button>
@@ -141,8 +170,8 @@ import { ToolManager } from './js/tools.js';
 import { MindmapController } from './js/mindmap.js';
 import { syncZCounter } from './js/shapes.js';
 import {
-  avatarHtml, colorOf, escapeHtml, getMe, initPage, loginDialog, qs,
-  toast, promptDialog,
+  avatarHtml, colorOf, confirmDialog, escapeHtml, fmtRel, getMe, initPage,
+  loginDialog, qs, toast, promptDialog,
 } from './js/ui.js';
 
 const me = await initPage('mindmap', { gate: true, title: '思维导图' });
@@ -204,6 +233,66 @@ controller.installKeyboard();
 const $ = (id) => document.getElementById(id);
 let myRole = 'viewer';
 let boardMeta = null;
+let isFrozen = false;
+let canManageFreeze = false;
+
+function computeReadOnly() {
+  return isFrozen || myRole === 'viewer' || myRole === 'commenter';
+}
+
+function applyFrozenUI() {
+  $('frozen-banner').classList.toggle('show', isFrozen);
+  $('frozen-badge').classList.toggle('hidden', !isFrozen);
+  $('freeze-ribbon').classList.toggle('show', isFrozen);
+  $('btn-freeze').classList.toggle('hidden', isFrozen || !canManageFreeze);
+  $('btn-unfreeze').classList.toggle('hidden', !isFrozen || !canManageFreeze);
+  if (isFrozen && boardMeta) {
+    const parts = [];
+    if (boardMeta.frozen_by) parts.push(`由 @${boardMeta.frozen_by} 冻结`);
+    if (boardMeta.frozen_at) parts.push(fmtRel(boardMeta.frozen_at));
+    if (boardMeta.frozen_reason) parts.push(`原因: ${boardMeta.frozen_reason}`);
+    $('frozen-meta').textContent = parts.join(' · ');
+  }
+  tools.readOnly = computeReadOnly();
+  $('btn-child').disabled = $('btn-sibling').disabled =
+    $('btn-remove').disabled = $('btn-rename').disabled =
+    tools.readOnly;
+  $('btn-layout').disabled = tools.readOnly;
+  updateHistoryButtons();
+}
+
+function setFrozen(frozen, { silent = false } = {}) {
+  if (isFrozen === frozen) { tools.readOnly = computeReadOnly(); return; }
+  isFrozen = frozen;
+  if (frozen) crdt.clearHistory();
+  applyFrozenUI();
+  if (!silent) toast(frozen ? '🔒 白板已被冻结, 当前为只读状态' : '🔓 白板已解除冻结',
+    frozen ? 'warn' : 'success', 4000);
+}
+
+$('btn-freeze').onclick = async () => {
+  const reason = await promptDialog('冻结原因(可选, 将展示给所有成员)', {
+    title: `冻结白板 · ${boardMeta?.name || ''}`, value: '',
+  });
+  if (reason === null) return;
+  try {
+    const { board } = await Api.boards.freeze(boardId, reason.trim());
+    boardMeta = board;
+    setFrozen(true);
+    toast('白板已冻结, 所有人均无法再修改内容', 'success', 4000);
+  } catch (err) { toast(err.message || '冻结失败', 'error'); }
+};
+
+$('btn-unfreeze').onclick = async () => {
+  const ok = await confirmDialog(`解除白板「${boardMeta?.name || ''}」的冻结? 解除后编辑者可继续修改内容。`,
+    { title: '解除冻结' });
+  if (!ok) return;
+  try {
+    const { board } = await Api.boards.unfreeze(boardId);
+    boardMeta = board;
+    setFrozen(false);
+  } catch (err) { toast(err.message || '解除冻结失败', 'error'); }
+};
 
 /* ---------------------------------------------------------------- 顶栏动作 */
 $('btn-sidebar').onclick = () => $('sidebar').classList.toggle('collapsed');
@@ -228,6 +317,7 @@ $('btn-zoom-out').onclick = () => engine.zoomAt(0.8, engine.width / 2, engine.he
 $('btn-zoom-fit').onclick = () => { engine.fitToContent(120); updateMinimap(); };
 
 $('board-name').onclick = async () => {
+  if (isFrozen) return toast('白板已冻结, 无法重命名', 'warn');
   if (!['owner', 'editor'].includes(myRole)) return;
   const name = await promptDialog('白板名称', { value: boardMeta?.name || '' });
   if (!name) return;
@@ -300,11 +390,13 @@ function structuralOps(ops) {
 
 socket.on('welcome', (msg) => {
   myRole = msg.role || 'viewer';
+  canManageFreeze = myRole === 'owner';
   $('st-role').textContent = `角色: ${myRole}`;
   if (msg.board) {
     boardMeta = { ...(boardMeta || {}), ...msg.board };
     $('board-name').textContent = boardMeta.name || '…';
     document.title = `${boardMeta.name} · 思维导图`;
+    isFrozen = !!msg.board.frozen;
   }
   if (msg.state) {
     shapes.clear();
@@ -318,16 +410,28 @@ socket.on('welcome', (msg) => {
     toast(`已补发 ${msg.catchup.ops.length} 个离线期间的操作`, 'success');
   }
   renderUsers(msg.clients);
-  tools.readOnly = myRole === 'viewer' || myRole === 'commenter';
-  if (tools.readOnly) {
-    $('btn-child').disabled = $('btn-sibling').disabled = $('btn-remove').disabled = true;
-    $('btn-layout').disabled = true;
-    toast('当前角色只读, 无法编辑导图', 'warn');
+  applyFrozenUI();
+  if (computeReadOnly()) {
+    toast(isFrozen ? '🔒 白板已冻结: 可查看、回放与导出, 无法编辑' : '当前角色只读, 无法编辑导图',
+      'warn', 4200);
   }
-  if (!controller.rootNode() && !tools.readOnly) controller.ensureRoot();
+  if (!controller.rootNode() && !computeReadOnly()) controller.ensureRoot();
   controller.renderOutline();
   engine.fitToContent(120);
   afterChange();
+});
+
+socket.on('frozen', (msg) => {
+  if (boardMeta) { boardMeta.frozen = true; boardMeta.frozen_at = msg.ts; boardMeta.frozen_by = msg.by; }
+  setFrozen(true);
+});
+socket.on('unfrozen', (msg) => {
+  if (boardMeta) {
+    boardMeta.frozen = false; boardMeta.frozen_at = null;
+    boardMeta.frozen_by = null; boardMeta.frozen_reason = null;
+  }
+  setFrozen(false);
+  if (!controller.rootNode()) controller.ensureRoot();
 });
 
 socket.on('ops', (msg) => {
@@ -356,6 +460,7 @@ socket.on('presence', (msg) => renderUsers(msg.clients));
 socket.on('hello_ok', (msg) => renderUsers(msg.clients));
 socket.on('error', (msg) => {
   if (msg.code === 'read_only') toast(msg.message || '只读', 'warn');
+  else if (msg.code === 'board_frozen') { setFrozen(true); toast(msg.message || '白板已冻结', 'warn'); }
 });
 socket.on('fatal', async (msg) => {
   if (msg.code === 4401) { if (await loginDialog('会话已过期')) location.reload(); }
@@ -367,6 +472,8 @@ try {
   const data = await Api.boards.state(boardId);
   boardMeta = data.board;
   myRole = data.your_role;
+  isFrozen = !!boardMeta.frozen;
+  canManageFreeze = myRole === 'owner';
   $('board-name').textContent = boardMeta.name || '思维导图';
   document.title = `${boardMeta.name} · 思维导图`;
   $('st-role').textContent = `角色: ${myRole}`;
@@ -374,8 +481,8 @@ try {
   socket.lastRev = data.rev || 0;
   engine.rebuildIndex();
   syncZCounter(shapes);
-  tools.readOnly = myRole === 'viewer' || myRole === 'commenter';
-  if (!controller.rootNode() && !tools.readOnly) controller.ensureRoot();
+  applyFrozenUI();
+  if (!controller.rootNode() && !computeReadOnly()) controller.ensureRoot();
   controller.renderOutline();
   engine.fitToContent(120);
   updateStatus();

@@ -95,8 +95,11 @@ export class MindmapController {
   }
 
   /* ------------------------------------------------------------ 结构操作 */
+  get readOnly() { return !!this.tools?.readOnly; }
+
   ensureRoot() {
     if (this.rootNode()) return this.rootNode();
+    if (this.readOnly) return null;       // 冻结/只读视图不自动建根
     const root = createShape('mindnode', {
       id: uidShape(), x: 0, y: 0, text: '中心主题',
       fill: LEVEL_FILLS[0], textColor: '#ffffff', fontSize: 18,
@@ -110,6 +113,7 @@ export class MindmapController {
   }
 
   addChild(parentId = this.selectedId) {
+    if (this.readOnly) return null;
     const parent = this.shapes.get(parentId) || this.ensureRoot();
     if (!parent || parent.deleted) return null;
     const level = this.levelOf(parent) + 1;
@@ -146,6 +150,7 @@ export class MindmapController {
   }
 
   removeNode(nodeId = this.selectedId) {
+    if (this.readOnly) return;
     const node = this.shapes.get(nodeId);
     if (!node || node.deleted) return;
     if (!node.parent) {
@@ -163,6 +168,7 @@ export class MindmapController {
   }
 
   toggleCollapse(nodeId = this.selectedId) {
+    if (this.readOnly) return;
     const node = this.shapes.get(nodeId);
     if (!node || node.deleted || !this.childrenOf(nodeId).length) return;
     this.crdt.commit(this.shapes,
@@ -174,6 +180,7 @@ export class MindmapController {
   }
 
   collapseAll() {
+    if (this.readOnly) return;
     const ops = [];
     for (const node of this.nodes()) {
       if (node.parent && this.childrenOf(node.id).length && !node.collapsed) {
@@ -187,6 +194,7 @@ export class MindmapController {
   }
 
   expandAll() {
+    if (this.readOnly) return;
     const ops = [];
     for (const node of this.nodes()) {
       if (node.collapsed) ops.push(this.crdt.setProps(node.id, { collapsed: false }));
@@ -198,6 +206,7 @@ export class MindmapController {
   }
 
   renameSelected() {
+    if (this.readOnly) return;
     if (this.selectedId) this.tools?.openTextEditor(this.selectedId);
   }
 

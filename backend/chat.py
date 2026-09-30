@@ -94,7 +94,9 @@ async def get_chat(board_id: str,
 @router.post("/{board_id}/chat")
 async def post_chat(board_id: str, req: ChatPostReq,
                     user: Dict[str, Any] = Depends(auth.current_user)):
-    await board_ctx(board_id, user, "viewer")
+    meta, _role = await board_ctx(board_id, user, "viewer")
+    if meta.get("frozen"):
+        raise HTTPException(status_code=409, detail="白板已冻结, 聊天已关闭")
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="消息不能为空")
     message = await append_message(board_id, user, req.text.strip(), req.kind)

@@ -58,6 +58,18 @@
 
       <div id="perm-content" class="perm-layout hidden">
         <div class="col" style="gap:14px">
+          <!-- 冻结状态 -->
+          <div class="panel" id="freeze-panel">
+            <div class="panel-head">🔒 冻结状态
+              <span class="spacer"></span>
+              <button class="btn sm danger" id="btn-freeze">冻结为只读</button>
+              <button class="btn sm hidden" id="btn-unfreeze">解除冻结</button>
+            </div>
+            <div class="panel-body">
+              <div id="freeze-info" class="small" style="line-height:1.9;color:var(--text-soft)"></div>
+            </div>
+          </div>
+
           <!-- 成员权限矩阵 -->
           <div class="panel">
             <div class="panel-head">
@@ -241,7 +253,7 @@ async function loadBoards(me) {
     return;
   }
   select.innerHTML = boards.map((b) => `
-    <option value="${escapeHtml(b.id)}">${b.mode === 'mindmap' ? '🧠' : '🎨'} ${escapeHtml(b.name)}（${ROLE_LABEL[b.your_role] || b.your_role}）</option>`).join('');
+    <option value="${escapeHtml(b.id)}">${b.frozen ? '🔒 ' : (b.mode === 'mindmap' ? '🧠' : '🎨')} ${escapeHtml(b.name)}（${ROLE_LABEL[b.your_role] || b.your_role}）</option>`).join('');
   const wanted = qs('board') || localStorage.getItem(LS_BOARD) || boards[0].id;
   const initial = boards.some((b) => b.id === wanted) ? wanted : boards[0].id;
   select.value = initial;
@@ -273,9 +285,49 @@ async function loadPermissions(viaRefresh = false) {
   renderMatrix();
   renderInvite();
   renderPreview();
+  renderFreeze();
   updateSaveState();
   if (viaRefresh) toast('权限已刷新', 'success');
 }
+
+function renderFreeze() {
+  const canManage = !!perm.can_manage;
+  const frozen = !!perm.frozen;
+  document.getElementById('btn-freeze').classList.toggle('hidden', frozen || !canManage);
+  document.getElementById('btn-unfreeze').classList.toggle('hidden', !frozen || !canManage);
+  const info = document.getElementById('freeze-info');
+  if (frozen) {
+    const bits = [];
+    if (perm.frozen_by) bits.push(`操作人 @${escapeHtml(perm.frozen_by)}`);
+    if (perm.frozen_at) bits.push(`时间 ${fmtTime(perm.frozen_at)}`);
+    info.innerHTML = `<span class="badge red">🔒 已冻结</span>
+      白板内容对所有人只读(含原编辑者与所有者), 仍可查看、回放和导出。<br>
+      ${bits.join(' · ')}
+      ${perm.frozen_reason ? `<br>冻结原因: ${escapeHtml(perm.frozen_reason)}` : ''}
+      ${canManage ? '' : '<br><span class="muted">仅所有者或管理员可解除冻结。</span>'}`;
+  } else {
+    info.innerHTML = `<span class="badge green">可编辑</span>
+      白板处于正常协作状态。冻结后任何人(含所有者)都无法修改内容, 仅可查看 / 回放 / 导出, 需由所有者或管理员解除。`;
+  }
+}
+
+document.getElementById('btn-freeze').onclick = async () => {
+  const reason = window.prompt('冻结原因(可选, 将展示给所有成员):', '') ?? null;
+  if (reason === null) return;
+  try {
+    await Api.boards.freeze(currentBoard.id, reason.trim());
+    toast('白板已冻结', 'success');
+    await loadPermissions();
+  } catch (err) { toast(err.message || '冻结失败', 'error'); }
+};
+document.getElementById('btn-unfreeze').onclick = async () => {
+  if (!await confirmDialog('解除该白板的冻结? 解除后编辑者可继续修改内容。', { title: '解除冻结' })) return;
+  try {
+    await Api.boards.unfreeze(currentBoard.id);
+    toast('已解除冻结', 'success');
+    await loadPermissions();
+  } catch (err) { toast(err.message || '解除冻结失败', 'error'); }
+};
 
 function sourceOf(username) {
   if (!perm) return '—';

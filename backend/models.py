@@ -50,6 +50,10 @@ class DuplicateReq(BaseModel):
     name: Optional[str] = None
 
 
+class FreezeReq(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
 # ---------------------------------------------------------------- 聊天
 class ChatPostReq(BaseModel):
     text: str = Field(min_length=1, max_length=4000)

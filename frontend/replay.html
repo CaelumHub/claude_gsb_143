@@ -190,7 +190,7 @@ document.querySelectorAll('.tabs .tab').forEach((tab) => {
 async function loadBoards() {
   const { boards } = await Api.boards.list({ sort: 'updated' });
   $('board-select').innerHTML = (boards || []).map((b) =>
-    `<option value="${b.id}" ${b.id === currentBoard ? 'selected' : ''}>${b.mode === 'mindmap' ? '🧠' : '🎨'} ${escapeHtml(b.name)}</option>`).join('')
+    `<option value="${b.id}" ${b.id === currentBoard ? 'selected' : ''}>${b.frozen ? '🔒 ' : ''}${b.mode === 'mindmap' ? '🧠' : '🎨'} ${escapeHtml(b.name)}</option>`).join('')
     || '<option value="">(无可见白板)</option>';
   if (!currentBoard && boards?.length) currentBoard = boards[0].id;
   return boards || [];

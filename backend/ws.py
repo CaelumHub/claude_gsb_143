@@ -42,7 +42,7 @@ from typing import Any, Deque, Dict, List, Optional
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from . import auth, chat as chat_mod, config
-from .boards import manager
+from .boards import BoardFrozenError, manager
 from .history import history_service
 from .models import limit_catchup
 
@@ -247,8 +247,11 @@ class ConnectionManager:
         welcome: Dict[str, Any] = {
             "type": "welcome",
             "you": client.presence_dict(),
-            "board": {k: meta.get(k) for k in ("id", "name", "mode", "owner", "tags")},
+            "board": {k: meta.get(k) for k in
+                      ("id", "name", "mode", "owner", "tags", "frozen",
+                       "frozen_at", "frozen_by", "frozen_reason")},
             "role": client.role,
+            "frozen": bool(meta.get("frozen")),
             "head_rev": head_rev,
             "clients": self.room_snapshot_clients(room),
             "server_time": int(time.time() * 1000),
@@ -341,12 +344,23 @@ class ConnectionManager:
             await self.send(client, {"type": "error", "code": "read_only",
                                      "message": "当前角色无法编辑(需要 editor 及以上)"})
             return
+        # 冻结状态以最新 meta 为准(连接后被冻结也立即生效, owner/admin 同样禁止)
+        meta = manager.get_meta(client.board_id)
+        if meta is not None and meta.get("frozen"):
+            await self.send(client, {"type": "error", "code": "board_frozen",
+                                     "message": "白板已冻结, 内容为只读"})
+            return
         raw_ops: List[Any] = msg.get("ops") if msg.get("type") == "ops" else [msg.get("op")]
         raw_ops = [o for o in (raw_ops or []) if o is not None]
         if not raw_ops:
             return
-        accepted = await manager.ingest_ops(client.board_id, raw_ops,
-                                            by=client.user.get("username", ""))
+        try:
+            accepted = await manager.ingest_ops(client.board_id, raw_ops,
+                                                by=client.user.get("username", ""))
+        except BoardFrozenError:
+            await self.send(client, {"type": "error", "code": "board_frozen",
+                                     "message": "白板已冻结, 内容为只读"})
+            return
         if not accepted:
             await self.send(client, {"type": "error", "code": "invalid_op",
                                      "message": "操作被拒绝(校验失败)"})
@@ -375,6 +389,11 @@ class ConnectionManager:
         if not auth.role_at_least(client.role, "commenter"):
             await self.send(client, {"type": "error", "code": "no_chat",
                                      "message": "当前角色无法发言"})
+            return
+        meta = manager.get_meta(client.board_id)
+        if meta is not None and meta.get("frozen"):
+            await self.send(client, {"type": "error", "code": "board_frozen",
+                                     "message": "白板已冻结, 聊天已关闭"})
             return
         text = str(msg.get("text") or "").strip()
         if not text:
