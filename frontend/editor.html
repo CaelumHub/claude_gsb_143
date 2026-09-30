@@ -84,6 +84,11 @@
   .shortcut-table { width: 100%; font-size: 12.5px; border-collapse: collapse; }
   .shortcut-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-soft); }
   .shortcut-table td:first-child { white-space: nowrap; }
+
+  /* 冻结态: 工具栏整体不可交互(保留滚动) */
+  .ed-rail.frozen { opacity: .45; pointer-events: none; }
+  .ed-side.frozen { opacity: .6; }
+  .ed-side.frozen .swatch, .ed-side.frozen input, .ed-side.frozen button { pointer-events: none; }
 </style>
 </head>
 <body>
@@ -92,6 +97,7 @@
   <div class="ed-topline">
     <span class="ed-board-name" id="board-name" title="点击重命名">…</span>
     <span class="badge" id="mode-badge">白板</span>
+    <span class="badge frozen hidden" id="frozen-badge" title="已定稿冻结, 仅可查看/回放/导出">🔒 已冻结</span>
     <button class="btn sm ghost" id="btn-mindmap" title="在思维导图页打开">🧠 导图模式</button>
     <div class="vdivider"></div>
     <button class="btn sm ghost" id="btn-undo" title="撤销 Ctrl+Z" disabled>↩︎</button>
@@ -104,9 +110,19 @@
     <span class="spacer"></span>
     <div class="ed-users" id="user-bar"></div>
     <span class="conn-badge" id="conn-badge"><span class="dot off"></span>连接中…</span>
+    <button class="btn sm ghost" id="btn-freeze" title="冻结定稿: 冻结后任何人不可再编辑">🔒 冻结</button>
     <button class="btn sm ghost" id="btn-share" title="复制邀请链接">🔗 分享</button>
     <button class="btn sm ghost" id="btn-snapshot" title="手动保存状态快照">💾 快照</button>
     <button class="btn sm ghost" id="btn-help" title="快捷键帮助">？</button>
+  </div>
+
+  <!-- 冻结横幅 -->
+  <div class="freeze-banner" id="freeze-banner">
+    <span class="ico">🔒</span>
+    <span>该白板已冻结定稿, 内容为只读 —— 可正常查看、回放与导出, 任何人(含编辑者)均无法修改</span>
+    <span class="meta" id="freeze-meta"></span>
+    <span class="spacer"></span>
+    <button class="btn sm" id="btn-unfreeze">🔓 解除冻结</button>
   </div>
 
   <div class="ed-body">
@@ -223,8 +239,8 @@ if (!boardId) {
       <div class="bp-item" data-id="${b.id}" data-mode="${b.mode}">
         <span style="font-size:20px">${b.mode === 'mindmap' ? '🧠' : '🎨'}</span>
         <span>
-          <div class="bold">${escapeHtml(b.name)}</div>
-          <div class="small muted">${fmtRel(b.updated_at)} · ${b.stats?.shapes ?? 0} 图形 · ${escapeHtml(b.your_role)}</div>
+          <div class="bold">${b.frozen ? '🔒 ' : ''}${escapeHtml(b.name)}</div>
+          <div class="small muted">${b.frozen ? '已定稿冻结 · ' : ''}${fmtRel(b.updated_at)} · ${b.stats?.shapes ?? 0} 图形 · ${escapeHtml(b.your_role)}</div>
         </span>
       </div>`).join('') || '<div class="empty-state"><div class="icon">🗒</div><div class="title">还没有白板, 先创建一个吧</div></div>';
     listEl.querySelectorAll('.bp-item').forEach((el) => {
@@ -274,8 +290,56 @@ const tools = new ToolManager({
 /* ---------------------------------------------------------------- 顶栏与状态 */
 let boardMeta = null;
 let myRole = 'viewer';
+let boardFrozen = false;
 
 const $ = (id) => document.getElementById(id);
+
+function canManageBoard() {
+  return myRole === 'owner';   // admin 在服务端被解析为 owner
+}
+
+function applyFrozenUI(silent = false) {
+  const frozen = !!boardFrozen;
+  tools.readOnly = frozen || myRole === 'viewer' || myRole === 'commenter';
+  $('frozen-badge').classList.toggle('hidden', !frozen);
+  $('freeze-banner').classList.toggle('show', frozen);
+  $('tool-rail').classList.toggle('frozen', frozen);
+  $('side-panel').classList.toggle('frozen', frozen);
+  // 顶栏「冻结」按钮: 仅 owner/admin 可见; 冻结后隐藏(改由横幅内解冻)
+  $('btn-freeze').classList.toggle('hidden', frozen || !canManageBoard());
+  $('btn-unfreeze').classList.toggle('hidden', !canManageBoard());
+  if (boardMeta?.frozen_at) {
+    const who = boardMeta.frozen_by ? `@${boardMeta.frozen_by}` : '';
+    $('freeze-meta').textContent = `${fmtRel(boardMeta.frozen_at)} 由 ${who} 冻结`;
+  }
+  $('btn-undo').disabled = $('btn-redo').disabled = true;
+  updateHistoryButtons();
+  if (frozen) {
+    // 丢弃断线期间残留的本地待发操作, 避免解冻前反复重发被服务端拒绝
+    if (socket.pending.length) socket._removePending(new Set(socket.pending.map((o) => o.op_id)));
+  }
+  if (frozen && !silent) {
+    toast('🔒 白板已冻结定稿, 当前为只读模式(可查看 / 回放 / 导出)', 'warn', 4200);
+  }
+}
+
+async function toggleFrozen(frozen) {
+  const ok = await confirmDialog(
+    frozen
+      ? '冻结后白板定稿为只读: 任何人(包括你自己)都不能再修改内容, 但可正常查看、回放和导出。之后可由你或管理员随时解冻。确认冻结?'
+      : '解除冻结后, 拥有编辑权限的成员将可以再次修改该白板。确认解冻?',
+    { title: frozen ? '冻结白板(定稿只读)' : '解除冻结', danger: false });
+  if (!ok) return;
+  try {
+    const { board } = await Api.boards.freeze(boardId, frozen);
+    boardMeta = { ...(boardMeta || {}), ...board };
+    boardFrozen = !!board.frozen;
+    applyFrozenUI();
+    toast(frozen ? '🔒 已冻结定稿' : '🔓 已解除冻结, 可继续编辑', 'success');
+  } catch (err) { toast(err.message || '操作失败', 'error'); }
+}
+$('btn-freeze').onclick = () => toggleFrozen(true);
+$('btn-unfreeze').onclick = () => toggleFrozen(false);
 
 function setConnBadge(status, extra = {}) {
   const el = $('conn-badge');
@@ -437,6 +501,7 @@ engine.opts.onZoomChange = null;
 tools.opts.onZoomChange = () => updateZoomLabel();
 
 $('board-name').onclick = async () => {
+  if (boardFrozen) return toast('白板已冻结, 无法重命名', 'warn');
   if (!['owner', 'editor'].includes(myRole)) return toast('无重命名权限', 'warn');
   const name = await promptDialog('白板名称', { value: boardMeta?.name || '' });
   if (!name) return;
@@ -549,14 +614,31 @@ socket.on('welcome', async (msg) => {
     toast(`已补发 ${msg.catchup.ops.length} 个离线期间的操作`, 'success');
   }
   renderUsers(msg.clients);
-  tools.readOnly = myRole === 'viewer' || myRole === 'commenter';
-  if (tools.readOnly) {
-    toast(myRole === 'commenter' ? '你是评论成员: 可查看与聊天, 不可编辑' : '你是只读成员: 仅可查看', 'warn', 4200);
+  boardFrozen = !!(msg.frozen ?? boardMeta?.frozen);
+  applyFrozenUI(true);
+  if (boardFrozen) {
+    toast('🔒 该白板已冻结定稿, 仅可查看 / 回放 / 导出', 'warn', 4200);
+  } else if (myRole === 'commenter') {
+    toast('你是评论成员: 可查看与聊天, 不可编辑', 'warn', 4200);
+  } else if (myRole === 'viewer') {
+    toast('你是只读成员: 仅可查看', 'warn', 4200);
   }
   if (!engine._userMoved) { engine.fitToContent(); }
   engine.markDirty();
   updateStats();
   markAllPathsDirty();
+});
+
+socket.on('board_frozen', (msg) => {
+  boardFrozen = !!msg.frozen;
+  if (boardMeta) {
+    boardMeta.frozen = msg.frozen;
+    boardMeta.frozen_at = msg.frozen_at ?? null;
+    boardMeta.frozen_by = msg.frozen_by ?? null;
+  }
+  applyFrozenUI(true);
+  if (msg.frozen) toast('🔒 白板已被冻结定稿, 已切换为只读', 'warn', 4200);
+  else toast('🔓 白板已解除冻结, 可继续编辑', 'success');
 });
 
 socket.on('ops', (msg) => {
@@ -604,6 +686,12 @@ socket.on('chat', (msg) => {
 
 socket.on('error', (msg) => {
   if (msg.code === 'read_only') toast(msg.message || '只读', 'warn');
+  else if (msg.code === 'board_frozen') {
+    boardFrozen = true;
+    if (boardMeta) boardMeta.frozen = true;
+    applyFrozenUI(true);
+    toast(msg.message || '白板已冻结, 无法编辑', 'warn');
+  }
   else if (msg.code !== 'bad_json') toast(`协同错误: ${msg.message || msg.code}`, 'error');
 });
 
@@ -635,7 +723,8 @@ try {
   syncZCounter(shapes);
   engine.fitToContent();
   updateStats();
-  tools.readOnly = myRole === 'viewer' || myRole === 'commenter';
+  boardFrozen = !!boardMeta.frozen;
+  applyFrozenUI(true);
 } catch (err) {
   if (err.status === 403) {
     document.body.innerHTML = '<div class="empty-state" style="height:100vh"><div class="icon">🔒</div><div class="title">无权访问该白板</div><div>请向所有者申请权限, 或<a href="/permissions.html">查看权限页</a></div></div>';
@@ -651,7 +740,7 @@ socket.connect();
 
 /* ---------------------------------------------------------------- 缩略图 & 状态刷新 */
 const scheduleThumbnail = debounce(async () => {
-  if (!['owner', 'editor'].includes(myRole)) return;
+  if (boardFrozen || !['owner', 'editor'].includes(myRole)) return;
   try {
     const canvas = document.createElement('canvas');
     const alive = [...shapes.values()].filter((s) => !s.deleted && s.kind !== 'ghost');
@@ -663,7 +752,7 @@ const scheduleThumbnail = debounce(async () => {
 
 window.addEventListener('beforeunload', () => {
   // 尽力而为: keepalive 让请求在页面卸载时仍能发出
-  if (!['owner', 'editor'].includes(myRole)) return;
+  if (boardFrozen || !['owner', 'editor'].includes(myRole)) return;
   try {
     const canvas = document.createElement('canvas');
     const alive = [...shapes.values()].filter((s) => !s.deleted && s.kind !== 'ghost');

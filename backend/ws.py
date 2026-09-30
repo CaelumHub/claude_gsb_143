@@ -42,7 +42,7 @@ from typing import Any, Deque, Dict, List, Optional
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from . import auth, chat as chat_mod, config
-from .boards import manager
+from .boards import BoardFrozenError, manager
 from .history import history_service
 from .models import limit_catchup
 
@@ -247,8 +247,11 @@ class ConnectionManager:
         welcome: Dict[str, Any] = {
             "type": "welcome",
             "you": client.presence_dict(),
-            "board": {k: meta.get(k) for k in ("id", "name", "mode", "owner", "tags")},
+            "board": {k: meta.get(k) for k in
+                      ("id", "name", "mode", "owner", "tags",
+                       "frozen", "frozen_at", "frozen_by")},
             "role": client.role,
+            "frozen": bool(meta.get("frozen")),
             "head_rev": head_rev,
             "clients": self.room_snapshot_clients(room),
             "server_time": int(time.time() * 1000),
@@ -341,12 +344,24 @@ class ConnectionManager:
             await self.send(client, {"type": "error", "code": "read_only",
                                      "message": "当前角色无法编辑(需要 editor 及以上)"})
             return
+        meta = manager.get_meta(client.board_id)
+        if meta is not None and meta.get("frozen"):
+            # 定稿冻结: 任何人(含 owner/编辑者)都不能再改内容
+            await self.send(client, {"type": "error", "code": "board_frozen",
+                                     "message": "白板已冻结(定稿只读), 无法编辑; 如需修改请联系所有者或管理员解冻"})
+            return
         raw_ops: List[Any] = msg.get("ops") if msg.get("type") == "ops" else [msg.get("op")]
         raw_ops = [o for o in (raw_ops or []) if o is not None]
         if not raw_ops:
             return
-        accepted = await manager.ingest_ops(client.board_id, raw_ops,
-                                            by=client.user.get("username", ""))
+        try:
+            accepted = await manager.ingest_ops(client.board_id, raw_ops,
+                                                by=client.user.get("username", ""))
+        except BoardFrozenError as exc:
+            # 兜底: 本连接存活期间白板被他人冻结(正常已由 board_frozen 广播处理)
+            await self.send(client, {"type": "error", "code": "board_frozen",
+                                     "message": str(exc)})
+            return
         if not accepted:
             await self.send(client, {"type": "error", "code": "invalid_op",
                                      "message": "操作被拒绝(校验失败)"})

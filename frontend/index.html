@@ -134,16 +134,19 @@ function boardEditorHref(board) {
 function boardCard(board) {
   const roleBadge = { owner: '<span class="badge accent">所有者</span>', editor: '<span class="badge green">可编辑</span>',
     commenter: '<span class="badge yellow">可评论</span>', viewer: '<span class="badge">只读</span>' }[board.your_role] || '';
+  const frozenBadge = board.frozen
+    ? '<span class="badge frozen" title="已定稿冻结, 仅可查看/回放/导出">🔒 已冻结</span>' : '';
+  const ribbon = board.frozen ? '<span class="frozen-ribbon">🔒 已冻结</span>' : '';
   const thumb = board.thumbnail
     ? `<img src="${board.thumbnail}" alt="">`
     : `<span class="placeholder">${board.mode === 'mindmap' ? '🧠' : '🎨'}</span>`;
   return `
-  <div class="card hoverable board-card" data-id="${board.id}">
-    <div class="thumb-box">${thumb}</div>
+  <div class="card hoverable board-card ${board.frozen ? 'is-frozen' : ''}" data-id="${board.id}">
+    <div class="thumb-box" style="position:relative">${ribbon}${thumb}</div>
     <div class="info">
-      <div class="name">${board.mode === 'mindmap' ? '🧠' : '🎨'} ${escapeHtml(board.name)} ${roleBadge}</div>
+      <div class="name">${board.mode === 'mindmap' ? '🧠' : '🎨'} ${escapeHtml(board.name)} ${frozenBadge}${roleBadge}</div>
       <div class="sub">
-        <span>${fmtRel(board.updated_at)}</span>
+        <span>${board.frozen ? '定稿冻结 · ' : ''}${fmtRel(board.updated_at)}</span>
         <span>·</span><span>${board.stats?.shapes ?? '—'} 图形</span>
         <span>·</span><span>@${escapeHtml(board.owner || '?')}</span>
       </div>

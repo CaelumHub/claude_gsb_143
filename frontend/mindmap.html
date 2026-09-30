@@ -65,37 +65,49 @@
   .ed-users { display: flex; align-items: center; }
   .ed-users .wb-avatar { margin-left: -7px; border: 2px solid var(--bg-panel); }
   .ed-users .wb-avatar:first-child { margin-left: 0; }
+  .mm-topline.frozen .edit-only { opacity: .45; pointer-events: none; }
 </style>
 </head>
 <body>
 <div class="wb-page">
-  <div class="mm-topline">
+  <div class="mm-topline" id="mm-topline">
     <button class="btn sm ghost" id="btn-sidebar" title="折叠/展开大纲">☰</button>
     <span class="mm-board-name" id="board-name">…</span>
     <span class="badge purple">思维导图</span>
+    <span class="badge frozen hidden" id="frozen-badge" title="已定稿冻结, 仅可查看/回放/导出">🔒 已冻结</span>
+    <div class="vdivider edit-only"></div>
+    <button class="btn sm edit-only" id="btn-child">＋ 子节点 <kbd>Tab</kbd></button>
+    <button class="btn sm edit-only" id="btn-sibling">＋ 兄弟 <kbd>⏎</kbd></button>
+    <button class="btn sm ghost edit-only" id="btn-rename">✏️ 重命名 <kbd>F2</kbd></button>
+    <button class="btn sm ghost danger edit-only" id="btn-remove">🗑 删除分支</button>
+    <div class="vdivider edit-only"></div>
+    <button class="btn sm ghost edit-only" id="btn-collapse">⇄ 折叠/展开</button>
+    <button class="btn sm ghost edit-only" id="btn-collapse-all">⊟ 全折叠</button>
+    <button class="btn sm ghost edit-only" id="btn-expand-all">⊞ 全展开</button>
     <div class="vdivider"></div>
-    <button class="btn sm" id="btn-child">＋ 子节点 <kbd>Tab</kbd></button>
-    <button class="btn sm" id="btn-sibling">＋ 兄弟 <kbd>⏎</kbd></button>
-    <button class="btn sm ghost" id="btn-rename">✏️ 重命名 <kbd>F2</kbd></button>
-    <button class="btn sm ghost danger" id="btn-remove">🗑 删除分支</button>
-    <div class="vdivider"></div>
-    <button class="btn sm ghost" id="btn-collapse">⇄ 折叠/展开</button>
-    <button class="btn sm ghost" id="btn-collapse-all">⊟ 全折叠</button>
-    <button class="btn sm ghost" id="btn-expand-all">⊞ 全展开</button>
-    <div class="vdivider"></div>
-    <select class="select" id="direction" style="width:110px;padding:4px 8px" title="布局方向">
+    <select class="select edit-only" id="direction" style="width:110px;padding:4px 8px" title="布局方向">
       <option value="right">→ 向右布局</option>
       <option value="both">↔ 左右分布</option>
       <option value="down">↓ 组织架构</option>
     </select>
-    <button class="btn sm primary" id="btn-layout">✨ 整理布局</button>
+    <button class="btn sm primary edit-only" id="btn-layout">✨ 整理布局</button>
     <span class="spacer"></span>
-    <button class="btn sm ghost" id="btn-undo" title="撤销" disabled>↩︎</button>
-    <button class="btn sm ghost" id="btn-redo" title="重做" disabled>↪︎</button>
+    <button class="btn sm ghost edit-only" id="btn-undo" title="撤销" disabled>↩︎</button>
+    <button class="btn sm ghost edit-only" id="btn-redo" title="重做" disabled>↪︎</button>
     <div class="vdivider"></div>
+    <button class="btn sm ghost" id="btn-freeze" title="冻结定稿: 冻结后任何人不可再编辑">🔒 冻结</button>
     <button class="btn sm ghost" id="btn-boardmode" title="在白板编辑页打开">🎨 白板模式</button>
     <div class="ed-users" id="user-bar"></div>
     <span class="conn-badge" id="conn-badge"><span class="dot off"></span>连接中…</span>
+  </div>
+
+  <!-- 冻结横幅 -->
+  <div class="freeze-banner" id="freeze-banner">
+    <span class="ico">🔒</span>
+    <span>该思维导图已冻结定稿, 内容为只读 —— 可正常查看、回放与导出, 任何人均无法修改</span>
+    <span class="meta" id="freeze-meta"></span>
+    <span class="spacer"></span>
+    <button class="btn sm" id="btn-unfreeze">🔓 解除冻结</button>
   </div>
 
   <div class="mm-body">
@@ -141,8 +153,8 @@ import { ToolManager } from './js/tools.js';
 import { MindmapController } from './js/mindmap.js';
 import { syncZCounter } from './js/shapes.js';
 import {
-  avatarHtml, colorOf, escapeHtml, getMe, initPage, loginDialog, qs,
-  toast, promptDialog,
+  avatarHtml, colorOf, confirmDialog, escapeHtml, fmtRel, getMe, initPage,
+  loginDialog, qs, toast, promptDialog,
 } from './js/ui.js';
 
 const me = await initPage('mindmap', { gate: true, title: '思维导图' });
@@ -204,6 +216,46 @@ controller.installKeyboard();
 const $ = (id) => document.getElementById(id);
 let myRole = 'viewer';
 let boardMeta = null;
+let boardFrozen = false;
+
+function canManageBoard() { return myRole === 'owner'; }
+
+function applyFrozenUI(silent = false) {
+  const frozen = !!boardFrozen;
+  tools.readOnly = frozen || myRole === 'viewer' || myRole === 'commenter';
+  $('frozen-badge').classList.toggle('hidden', !frozen);
+  $('freeze-banner').classList.toggle('show', frozen);
+  $('mm-topline').classList.toggle('frozen', frozen);
+  $('btn-freeze').classList.toggle('hidden', frozen || !canManageBoard());
+  $('btn-unfreeze').classList.toggle('hidden', !canManageBoard());
+  $('btn-child').disabled = $('btn-sibling').disabled = $('btn-remove').disabled = frozen || tools.readOnly;
+  $('btn-layout').disabled = frozen || tools.readOnly;
+  if (boardMeta?.frozen_at) {
+    const who = boardMeta.frozen_by ? `@${boardMeta.frozen_by}` : '';
+    $('freeze-meta').textContent = `${fmtRel(boardMeta.frozen_at)} 由 ${who} 冻结`;
+  }
+  $('btn-undo').disabled = $('btn-redo').disabled = true;
+  updateHistoryButtons();
+  if (frozen && !silent) toast('🔒 导图已冻结定稿, 当前为只读模式', 'warn', 4200);
+}
+
+async function toggleFrozen(frozen) {
+  const ok = await confirmDialog(
+    frozen
+      ? '冻结后该思维导图定稿为只读: 任何人(包括你自己)都不能再修改内容, 但可正常查看、回放和导出。之后可由你或管理员随时解冻。确认冻结?'
+      : '解除冻结后, 拥有编辑权限的成员将可以再次修改该思维导图。确认解冻?',
+    { title: frozen ? '冻结思维导图(定稿只读)' : '解除冻结' });
+  if (!ok) return;
+  try {
+    const { board } = await Api.boards.freeze(boardId, frozen);
+    boardMeta = { ...(boardMeta || {}), ...board };
+    boardFrozen = !!board.frozen;
+    applyFrozenUI();
+    toast(frozen ? '🔒 已冻结定稿' : '🔓 已解除冻结, 可继续编辑', 'success');
+  } catch (err) { toast(err.message || '操作失败', 'error'); }
+}
+$('btn-freeze').onclick = () => toggleFrozen(true);
+$('btn-unfreeze').onclick = () => toggleFrozen(false);
 
 /* ---------------------------------------------------------------- 顶栏动作 */
 $('btn-sidebar').onclick = () => $('sidebar').classList.toggle('collapsed');
@@ -228,6 +280,7 @@ $('btn-zoom-out').onclick = () => engine.zoomAt(0.8, engine.width / 2, engine.he
 $('btn-zoom-fit').onclick = () => { engine.fitToContent(120); updateMinimap(); };
 
 $('board-name').onclick = async () => {
+  if (boardFrozen) return toast('导图已冻结, 无法重命名', 'warn');
   if (!['owner', 'editor'].includes(myRole)) return;
   const name = await promptDialog('白板名称', { value: boardMeta?.name || '' });
   if (!name) return;
@@ -318,16 +371,33 @@ socket.on('welcome', (msg) => {
     toast(`已补发 ${msg.catchup.ops.length} 个离线期间的操作`, 'success');
   }
   renderUsers(msg.clients);
-  tools.readOnly = myRole === 'viewer' || myRole === 'commenter';
-  if (tools.readOnly) {
-    $('btn-child').disabled = $('btn-sibling').disabled = $('btn-remove').disabled = true;
-    $('btn-layout').disabled = true;
+  boardFrozen = !!(msg.frozen ?? boardMeta?.frozen);
+  applyFrozenUI(true);
+  if (boardFrozen) {
+    toast('🔒 该导图已冻结定稿, 仅可查看 / 回放 / 导出', 'warn', 4200);
+  } else if (tools.readOnly) {
     toast('当前角色只读, 无法编辑导图', 'warn');
   }
   if (!controller.rootNode() && !tools.readOnly) controller.ensureRoot();
   controller.renderOutline();
   engine.fitToContent(120);
   afterChange();
+});
+
+socket.on('board_frozen', (msg) => {
+  boardFrozen = !!msg.frozen;
+  if (boardMeta) {
+    boardMeta.frozen = msg.frozen;
+    boardMeta.frozen_at = msg.frozen_at ?? null;
+    boardMeta.frozen_by = msg.frozen_by ?? null;
+  }
+  applyFrozenUI(true);
+  if (msg.frozen) {
+    if (socket.pending.length) socket._removePending(new Set(socket.pending.map((o) => o.op_id)));
+    toast('🔒 导图已被冻结定稿, 已切换为只读', 'warn', 4200);
+  } else {
+    toast('🔓 导图已解除冻结, 可继续编辑', 'success');
+  }
 });
 
 socket.on('ops', (msg) => {
@@ -356,6 +426,12 @@ socket.on('presence', (msg) => renderUsers(msg.clients));
 socket.on('hello_ok', (msg) => renderUsers(msg.clients));
 socket.on('error', (msg) => {
   if (msg.code === 'read_only') toast(msg.message || '只读', 'warn');
+  else if (msg.code === 'board_frozen') {
+    boardFrozen = true;
+    if (boardMeta) boardMeta.frozen = true;
+    applyFrozenUI(true);
+    toast(msg.message || '导图已冻结, 无法编辑', 'warn');
+  }
 });
 socket.on('fatal', async (msg) => {
   if (msg.code === 4401) { if (await loginDialog('会话已过期')) location.reload(); }
@@ -375,6 +451,8 @@ try {
   engine.rebuildIndex();
   syncZCounter(shapes);
   tools.readOnly = myRole === 'viewer' || myRole === 'commenter';
+  boardFrozen = !!boardMeta.frozen;
+  applyFrozenUI(true);
   if (!controller.rootNode() && !tools.readOnly) controller.ensureRoot();
   controller.renderOutline();
   engine.fitToContent(120);

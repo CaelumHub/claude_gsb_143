@@ -62,6 +62,8 @@
   .file-card.selected { outline: 2px solid var(--accent); }
 
   .ops-cell { display: flex; gap: 4px; flex-wrap: nowrap; }
+  tr.board-row.is-frozen { background: #2e3a5e22; }
+  [data-theme="light"] tr.board-row.is-frozen { background: #e8f0ff; }
 </style>
 </head>
 <body>
@@ -220,25 +222,30 @@ async function main() {
         </tr></thead>
         <tbody>
         ${list.map((b) => `
-          <tr class="board-row" data-id="${b.id}">
+          <tr class="board-row ${b.frozen ? 'is-frozen' : ''}" data-id="${b.id}">
             <td><input type="checkbox" class="row-check" data-id="${b.id}" ${selected.has(b.id) ? 'checked' : ''}></td>
             <td class="name-cell">
               <span class="name-link" data-open="${b.id}" title="双击打开">${escapeHtml(b.name)}</span>
-              <span class="rename-ico" data-rename="${b.id}" title="重命名">✏️</span>
+              ${b.frozen
+                ? '<span class="badge frozen" title="已定稿冻结, 仅可查看/回放/导出">🔒 已冻结</span>'
+                : `<span class="rename-ico" data-rename="${b.id}" title="重命名">✏️</span>`}
               ${b.id === expandedId ? '<span class="small muted"> ▾</span>' : ''}
             </td>
             <td>${b.mode === 'mindmap' ? '<span class="badge purple">🧠 导图</span>' : '<span class="badge accent">🎨 白板</span>'}</td>
             <td>${ROLE_BADGE[b.your_role] || ''}</td>
-            <td><span class="tag-edit" data-tags="${b.id}" title="点击编辑标签">${(b.tags || []).length
+            <td><span class="tag-edit ${b.frozen ? '' : ''}" data-tags="${b.id}" title="${b.frozen ? '白板已冻结, 标签不可修改' : '点击编辑标签'}">${(b.tags || []).length
               ? (b.tags || []).map((t) => `<span class="tag">#${escapeHtml(t)}</span>`).join('')
-              : '<span class="small muted">＋ 标签</span>'}</span></td>
+              : `<span class="small muted">${b.frozen ? '—' : '＋ 标签'}</span>`}</span></td>
             <td class="mono">${fmtNum(b.stats?.shapes)}</td>
             <td class="mono muted">${fmtNum(b.stats?.rev)}</td>
-            <td title="${fmtTime(b.updated_at)}">${fmtRel(b.updated_at)}</td>
+            <td title="${fmtTime(b.updated_at)}">${b.frozen ? '🔒 ' : ''}${fmtRel(b.updated_at)}</td>
             <td>@${escapeHtml(b.owner || '?')}</td>
             <td><div class="ops-cell">
               <a class="btn sm" href="${editorHref(b)}">打开</a>
               <button class="btn sm" data-dup="${b.id}">副本</button>
+              ${b.your_role === 'owner'
+                ? `<button class="btn sm ${b.frozen ? '' : 'ghost'}" data-freeze="${b.id}">${b.frozen ? '🔓 解冻' : '🔒 冻结'}</button>`
+                : ''}
               <a class="btn sm" href="/permissions.html?board=${encodeURIComponent(b.id)}">权限</a>
               ${canDelete(b) ? `<button class="btn sm danger" data-del="${b.id}">删除</button>` : ''}
             </div></td>
@@ -277,18 +284,21 @@ async function main() {
     return `<div class="grid cols-4">${list.map((b) => `
       <div class="card file-card ${selected.has(b.id) ? 'selected' : ''}" data-id="${b.id}">
         <input type="checkbox" class="card-check row-check" data-id="${b.id}" ${selected.has(b.id) ? 'checked' : ''}>
-        <div class="thumb-box" data-open="${b.id}" style="cursor:pointer">
+        <div class="thumb-box" data-open="${b.id}" style="cursor:pointer;position:relative">
+          ${b.frozen ? '<span class="frozen-ribbon">🔒 已冻结</span>' : ''}
           ${b.thumbnail ? `<img src="${b.thumbnail}" alt="">` : `<span class="placeholder">${b.mode === 'mindmap' ? '🧠' : '🎨'}</span>`}
         </div>
         <div class="info" data-open="${b.id}" style="cursor:pointer">
-          <div class="name">${escapeHtml(b.name)} ${ROLE_BADGE[b.your_role] || ''}</div>
-          <div class="sub">${fmtRel(b.updated_at)} · ${fmtNum(b.stats?.shapes)} 图形 · @${escapeHtml(b.owner || '?')}</div>
+          <div class="name">${escapeHtml(b.name)} ${b.frozen ? '<span class="badge frozen">🔒 已冻结</span>' : ''} ${ROLE_BADGE[b.your_role] || ''}</div>
+          <div class="sub">${b.frozen ? '定稿冻结 · ' : ''}${fmtRel(b.updated_at)} · ${fmtNum(b.stats?.shapes)} 图形 · @${escapeHtml(b.owner || '?')}</div>
           <div style="margin-top:5px">${(b.tags || []).map((t) => `<span class="tag">#${escapeHtml(t)}</span>`).join('')}</div>
         </div>
         <div class="card-acts">
           <a class="btn sm" href="${editorHref(b)}">打开</a>
           <button class="btn sm" data-dup="${b.id}">副本</button>
-          <a class="btn sm" href="/permissions.html?board=${encodeURIComponent(b.id)}">权限</a>
+          ${b.your_role === 'owner'
+            ? `<button class="btn sm ${b.frozen ? '' : 'ghost'}" data-freeze="${b.id}">${b.frozen ? '🔓 解冻' : '🔒 冻结'}</button>`
+            : ''}
           ${canDelete(b) ? `<button class="btn sm danger" data-del="${b.id}">删</button>` : ''}
         </div>
       </div>`).join('')}</div>`;
@@ -357,6 +367,7 @@ async function main() {
       el.onclick = async (e) => {
         e.stopPropagation();
         const b = boards.find((x) => x.id === el.dataset.rename);
+        if (b.frozen) return toast('白板已冻结, 无法重命名', 'warn');
         const name = await promptDialog('白板名称', { title: '重命名', value: b.name });
         if (name && name !== b.name) {
           try { await Api.boards.patch(b.id, { name }); toast('已重命名', 'success'); load(true); }
@@ -369,11 +380,31 @@ async function main() {
       el.onclick = async (e) => {
         e.stopPropagation();
         const b = boards.find((x) => x.id === el.dataset.tags);
+        if (b.frozen) return toast('白板已冻结, 标签不可修改', 'warn');
         const input = await promptDialog('标签(逗号分隔)', { title: `编辑标签 · ${b.name}`, value: (b.tags || []).join(', ') });
         if (input === null) return;
         const tags = input.split(/[,，]/).map((s) => s.trim()).filter(Boolean).slice(0, 10);
         try { await Api.boards.patch(b.id, { tags }); toast('标签已更新', 'success'); load(true); }
         catch (err) { toast(err.message || '更新标签失败', 'error'); }
+      };
+    });
+
+    content.querySelectorAll('[data-freeze]').forEach((el) => {
+      el.onclick = async (e) => {
+        e.stopPropagation();
+        const b = boards.find((x) => x.id === el.dataset.freeze);
+        const frozen = !b.frozen;
+        const ok = await confirmDialog(
+          frozen
+            ? `冻结白板「${b.name}」? 冻结后任何人(含编辑者)都不能再修改内容, 但可正常查看、回放和导出; 之后可随时解冻。`
+            : `解除白板「${b.name}」的冻结? 解冻后编辑成员可再次修改。`,
+          { title: frozen ? '冻结白板(定稿只读)' : '解除冻结' });
+        if (!ok) return;
+        try {
+          await Api.boards.freeze(b.id, frozen);
+          toast(frozen ? '🔒 已冻结定稿' : '🔓 已解除冻结', 'success');
+          load(true);
+        } catch (err) { toast(err.message || '操作失败', 'error'); }
       };
     });
 
@@ -450,11 +481,14 @@ async function main() {
     const add = input.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
     if (!add.length) return;
     let done = 0;
+    let frozenSkipped = 0;
     for (const b of boards.filter((x) => selected.has(x.id))) {
+      if (b.frozen) { frozenSkipped += 1; continue; }
       const tags = [...new Set([...(b.tags || []), ...add])].slice(0, 10);
       try { await Api.boards.patch(b.id, { tags }); done += 1; }
       catch (err) { toast(`「${b.name}」标签更新失败: ${err.message}`, 'error'); }
     }
+    if (frozenSkipped) toast(`${frozenSkipped} 个白板已冻结, 已跳过`, 'warn');
     if (done) { toast(`已为 ${done} 个白板添加标签`, 'success'); load(true); }
   };
 

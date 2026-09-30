@@ -21,11 +21,15 @@ from . import auth, config
 from .crdt import BoardDoc, validate_op
 from .history import history_service
 from .models import (BoardCreateReq, BoardPatchReq, DuplicateReq,
-                     PermissionsReq)
+                     FreezeReq, PermissionsReq)
 from .storage import (now_ms, read_json, safe_id, write_json_atomic,
                       write_json_atomic_async)
 
 router = APIRouter(prefix="/api/boards", tags=["boards"])
+
+
+class BoardFrozenError(Exception):
+    """白板已冻结(定稿只读), 任何内容修改均被拒绝。"""
 
 
 def new_board_id() -> str:
@@ -90,6 +94,7 @@ class BoardManager:
             "id": meta.get("id"), "name": meta.get("name"), "mode": meta.get("mode"),
             "owner": meta.get("owner"), "created_at": meta.get("created_at"),
             "updated_at": meta.get("updated_at"), "tags": meta.get("tags") or [],
+            "frozen": bool(meta.get("frozen")),
         }
 
     def _write_index(self, boards: Optional[Dict[str, Any]] = None) -> None:
@@ -116,6 +121,29 @@ class BoardManager:
         boards = {bid: self._index_entry(m) for bid, m in self.metas.items()}
         await write_json_atomic_async(config.BOARD_INDEX_FILE,
                                       {"boards": boards, "updated_at": now_ms()})
+
+    async def set_frozen(self, board_id: str, frozen: bool,
+                         by: str) -> Dict[str, Any]:
+        """冻结(定稿只读)/解冻。冻结前强制快照, 固化最新内容。"""
+        meta = self.metas.get(board_id)
+        if meta is None:
+            raise KeyError(board_id)
+        async with self.lock_for(board_id):
+            if frozen and not meta.get("frozen"):
+                # 冻结时把内存热文档落成快照, 保证定稿内容已持久化
+                if board_id in self.docs:
+                    await self.force_snapshot(board_id)
+                meta["frozen"] = True
+                meta["frozen_at"] = now_ms()
+                meta["frozen_by"] = by
+            elif not frozen and meta.get("frozen"):
+                meta["frozen"] = False
+                meta["frozen_at"] = None
+                meta["frozen_by"] = None
+            else:
+                return meta          # 状态未变化, 幂等
+            await self.save_meta(board_id)
+        return meta
 
     # ------------------------------------------------------------ 文档装载
     def load_lock_for(self, board_id: str) -> asyncio.Lock:
@@ -203,6 +231,9 @@ class BoardManager:
         max_batch = int(settings.get("max_ops_per_batch") or 64)
         accepted: List[Dict[str, Any]] = []
         async with self.lock_for(board_id):
+            meta = self.metas.get(board_id)
+            if meta is not None and meta.get("frozen"):
+                raise BoardFrozenError("白板已冻结(定稿只读), 无法编辑; 如需修改请联系所有者或管理员解冻")
             doc = await self.get_doc(board_id)
             for raw in raw_ops[:max_batch]:
                 clean = validate_op(raw)
@@ -297,6 +328,9 @@ class BoardManager:
             "created_at": now,
             "updated_at": now,
             "created_by": owner,
+            "frozen": False,
+            "frozen_at": None,
+            "frozen_by": None,
             "thumbnail": None,
             "stats": {"rev": 0, "shapes": 0},
         }
@@ -433,6 +467,10 @@ async def get_board(board_id: str, user: Dict[str, Any] = Depends(auth.current_u
 async def patch_board(board_id: str, req: BoardPatchReq,
                       user: Dict[str, Any] = Depends(auth.current_user)):
     meta, role = await board_ctx(board_id, user, "editor")
+    if meta.get("frozen"):
+        # 冻结后白板定稿: 禁止改名/模式/标签/缩略图等一切内容修改
+        raise HTTPException(status_code=409,
+                            detail="白板已冻结(定稿只读), 无法修改; 请先由所有者或管理员解冻")
     if req.name is not None:
         meta["name"] = req.name[:80]
     if req.mode in ("board", "mindmap"):
@@ -463,6 +501,26 @@ async def duplicate_board(board_id: str, req: DuplicateReq,
     await board_ctx(board_id, user, "viewer")
     meta = await manager.duplicate_board(board_id, req.name, user["username"])
     return {"board": meta}
+
+
+@router.post("/{board_id}/freeze")
+async def freeze_board(board_id: str, req: FreezeReq,
+                       user: Dict[str, Any] = Depends(auth.current_user)):
+    """冻结定稿 / 解除冻结。仅所有者或管理员; 管理员在 board_role 中即 owner。"""
+    meta, role = await board_ctx(board_id, user, "owner")
+    if role != "owner":     # 理论上不会(依赖注入已拦), 双保险
+        raise HTTPException(status_code=403, detail="仅所有者或管理员可冻结/解冻白板")
+    meta = await manager.set_frozen(board_id, bool(req.frozen), user["username"])
+    # 实时通知房间内所有人(含操作者其他标签页)更新只读状态
+    from .ws import conn_manager
+    await conn_manager.broadcast(board_id, {
+        "type": "board_frozen",
+        "frozen": bool(meta.get("frozen")),
+        "frozen_at": meta.get("frozen_at"),
+        "frozen_by": meta.get("frozen_by"),
+        "by": user["username"],
+    })
+    return {"board": meta, "your_role": role}
 
 
 @router.get("/{board_id}/state")

@@ -101,6 +101,7 @@ export const Api = {
     patch: (id, payload) => request(`/api/boards/${id}`, { method: 'PATCH', body: payload }),
     remove: (id) => request(`/api/boards/${id}`, { method: 'DELETE' }),
     duplicate: (id, name) => request(`/api/boards/${id}/duplicate`, { method: 'POST', body: { name } }),
+    freeze: (id, frozen) => request(`/api/boards/${id}/freeze`, { method: 'POST', body: { frozen } }),
     state: (id) => request(`/api/boards/${id}/state`),
     snapshot: (id) => request(`/api/boards/${id}/snapshot`, { method: 'POST' }),
     stats: (id) => request(`/api/boards/${id}/stats`),

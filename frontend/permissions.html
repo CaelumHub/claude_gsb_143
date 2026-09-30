@@ -63,8 +63,10 @@
             <div class="panel-head">
               成员权限矩阵
               <span class="badge accent" id="matrix-owner"></span>
+              <span class="badge frozen hidden" id="matrix-frozen" title="已定稿冻结, 仅可查看/回放/导出">🔒 已冻结</span>
               <span class="badge" id="matrix-myrole"></span>
               <span class="spacer"></span>
+              <button class="btn sm ghost" id="btn-freeze" style="display:none"></button>
               <span class="save-bar-hint hidden" id="dirty-hint">● 有未保存的变更</span>
               <button class="btn primary sm" id="btn-save" disabled>保存变更</button>
             </div>
@@ -117,7 +119,9 @@
                   <tr><td><span class="badge green">可编辑 editor</span></td>
                       <td class="cap-list">commenter 全部能力 + 绘制/编辑图形 · 撤销重做 · 移动/删除元素 · 保存缩略图</td></tr>
                   <tr><td><span class="badge accent">所有者 owner</span></td>
-                      <td class="cap-list">editor 全部能力 + 成员与权限管理 · 重命名/删除白板 · 压缩历史分片(创建者与系统管理员自动拥有)</td></tr>
+                      <td class="cap-list">editor 全部能力 + 成员与权限管理 · 重命名/删除白板 · 冻结定稿/解冻 · 压缩历史分片(创建者与系统管理员自动拥有)</td></tr>
+                  <tr><td><span class="badge frozen">🔒 冻结定稿</span></td>
+                      <td class="cap-list">与角色正交的白板状态: 冻结后任何人(含所有者/编辑者)都不能修改内容, 但查看、历史回放、导出与聊天不受影响; 仅所有者或管理员可冻结/解除冻结</td></tr>
                 </tbody>
               </table>
               <div class="small muted" style="padding:10px 14px">
@@ -292,9 +296,35 @@ function renderMatrix() {
   const canManage = !!perm.can_manage;
   document.getElementById('matrix-owner').textContent = `所有者 @${perm.owner}`;
   document.getElementById('matrix-myrole').textContent = `我的角色: ${ROLE_LABEL[perm.your_role] || perm.your_role}`;
-  document.getElementById('matrix-note').textContent = canManage
-    ? '修改后点击右上角「保存变更」提交; 所有者不可被降级或移除。'
-    : '⚠ 仅白板所有者或系统管理员可修改成员权限, 当前为只读视图。';
+  const frozen = !!currentBoard?.frozen;
+  document.getElementById('matrix-frozen').classList.toggle('hidden', !frozen);
+  const freezeBtn = document.getElementById('btn-freeze');
+  freezeBtn.style.display = canManage ? '' : 'none';
+  freezeBtn.textContent = frozen ? '🔓 解除冻结' : '🔒 冻结定稿';
+  freezeBtn.classList.toggle('primary', !frozen);
+  document.getElementById('matrix-note').textContent = !canManage
+    ? '⚠ 仅白板所有者或系统管理员可修改成员权限, 当前为只读视图。'
+    : frozen
+      ? '🔒 白板已冻结定稿: 内容不可编辑, 但成员权限仍可调整(如授权查看者)。'
+      : '修改后点击右上角「保存变更」提交; 所有者不可被降级或移除。';
+
+  freezeBtn.onclick = async () => {
+    const next = !currentBoard.frozen;
+    const ok = await confirmDialog(
+      next
+        ? `冻结白板「${currentBoard.name}」? 冻结后任何人(含编辑者)都不能再修改内容, 但可正常查看、回放和导出; 之后可随时解冻。`
+        : `解除白板「${currentBoard.name}」的冻结? 解冻后编辑成员可再次修改。`,
+      { title: next ? '冻结白板(定稿只读)' : '解除冻结' });
+    if (!ok) return;
+    try {
+      const { board } = await Api.boards.freeze(currentBoard.id, next);
+      currentBoard.frozen = board.frozen;
+      const opt = boards.find((b) => b.id === currentBoard.id);
+      if (opt) opt.frozen = board.frozen;
+      renderMatrix();
+      toast(next ? '🔒 已冻结定稿' : '🔓 已解除冻结', 'success');
+    } catch (err) { toast(err.message || '操作失败', 'error'); }
+  };
 
   tbody.innerHTML = perm.users.map((u) => {
     const isOwner = u.username === perm.owner;

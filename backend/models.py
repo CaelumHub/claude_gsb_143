@@ -50,6 +50,10 @@ class DuplicateReq(BaseModel):
     name: Optional[str] = None
 
 
+class FreezeReq(BaseModel):
+    frozen: bool                          # true=冻结(定稿只读) / false=解冻
+
+
 # ---------------------------------------------------------------- 聊天
 class ChatPostReq(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
